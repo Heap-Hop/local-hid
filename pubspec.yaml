@@ -1,0 +1,21 @@
+name: local_hid
+description: "Local-network wireless HID — touchpad, virtual keyboard, and media keys over UDP for esp32-rust-c-hid-example."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.10.7
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  shared_preferences: ^2.5.5
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
