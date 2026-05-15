@@ -1,6 +1,6 @@
 # local-hid
 
-Flutter client for [`esp32-rust-c-hid-example`](../esp32-rust-c-hid-example).
+Flutter client for the [`esp32-rust-c-hid-example`](https://github.com/Heap-Hop/esp32-rust-c-hid-example) firmware.
 The phone (or laptop) acts as a wireless touchpad / virtual keyboard / media
 remote; the ESP32-S3 receives plain-text UDP commands on the local network and
 replays them as USB HID reports on the computer it is plugged into.
@@ -22,8 +22,9 @@ debugging, but the app does not block on it.
 
 ## Run
 
-1. Flash the firmware (see `../esp32-rust-c-hid-example/README.md`) and read
-   the IP it prints on the serial monitor.
+1. Flash the firmware
+   ([Heap-Hop/esp32-rust-c-hid-example](https://github.com/Heap-Hop/esp32-rust-c-hid-example))
+   and read the IP it prints on the serial monitor.
 2. Make sure the phone is on the same Wi-Fi.
 3. `flutter run` from this directory.
 4. Tap the gear icon and set the host (board IP) + port (default `9000`).
