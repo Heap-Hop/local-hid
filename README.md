@@ -34,19 +34,20 @@ debugging, but the app does not block on it.
 ```
 lib/
   main.dart        UI: tabs, touchpad, keyboard, media, settings
-  hid_client.dart  Bound UDP socket + sendLine() with optional reply wait
+  hid_client.dart  Bound UDP socket, fire-and-forget send, PING/PONG RTT
+  protocol.dart    Binary wire format + HID keycode / media-usage constants
   settings.dart    Persisted target host/port
 ```
 
-## Protocol (mirrors the firmware)
+## Protocol
 
-One command per UDP datagram, ASCII text. Whitespace-separated.
+Compact binary, one command per UDP datagram. The full spec lives in the
+firmware repo
+([README §Command protocol](https://github.com/Heap-Hop/esp32-rust-c-hid-example#command-protocol)
+and [`src/protocol.rs`](https://github.com/Heap-Hop/esp32-rust-c-hid-example/blob/main/src/protocol.rs))
+and is mirrored in [`lib/protocol.dart`](lib/protocol.dart).
 
-```
-k <name>                  # key tap: a-z, 0-9, enter, esc, space, tab,
-                          # backspace, left, right, up, down
-m <dx> <dy>               # relative mouse, each axis -127..127
-c [left|right|middle]     # mouse click, default left
-md <name>                 # media key: playpause, next, prev, stop,
-                          # mute, volup, voldown
-```
+Each datagram is `[0x48, version=1, opcode, ...payload]`. Typical packet sizes
+are 3–7 bytes. The app pings the firmware every 3 s to drive the
+connected / RTT indicator in the status bar; everything else is
+fire-and-forget.

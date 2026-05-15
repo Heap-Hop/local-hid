@@ -2,13 +2,12 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
-/// One-shot UDP sender for the text-line HID protocol exposed by
-/// esp32-rust-c-hid-example.
+import 'protocol.dart';
+
+/// Bound UDP sender for the binary HID protocol.
 ///
-/// The firmware accepts each datagram as one command line (`k a`, `m 10 -5`,
-/// `c left`, `md volup`, ...) and replies with a single `ok ...` / `err ...`
-/// datagram. We treat replies as best-effort; mouse moves in particular are
-/// fire-and-forget.
+/// Every command call is fire-and-forget — no waiting on a reply. Only
+/// [ping] expects a `PONG` back; the rest of the API just enqueues a send.
 class HidClient {
   HidClient();
 
@@ -16,12 +15,14 @@ class HidClient {
   InternetAddress? _address;
   int? _port;
   String? _resolvedHost;
-  final List<Completer<String>> _waiters = <Completer<String>>[];
+  int _pingSeq = 0;
+  final Map<int, Completer<Duration>> _pendingPings = {};
+  final Map<int, Stopwatch> _pingStopwatches = {};
+
+  bool get isConfigured => _socket != null;
 
   Future<void> configure({required String host, required int port}) async {
-    final unchanged =
-        _resolvedHost == host && _port == port && _socket != null;
-    if (unchanged) {
+    if (_resolvedHost == host && _port == port && _socket != null) {
       return;
     }
 
@@ -33,21 +34,18 @@ class HidClient {
     }
     final address = addresses.first;
 
-    final socket =
-        await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0, reuseAddress: true);
+    final socket = await RawDatagramSocket.bind(
+      InternetAddress.anyIPv4,
+      0,
+      reuseAddress: true,
+    );
     socket.listen(
       (event) {
-        if (event != RawSocketEvent.read) {
-          return;
-        }
+        if (event != RawSocketEvent.read) return;
         final datagram = socket.receive();
-        if (datagram == null) {
-          return;
-        }
-        final text = String.fromCharCodes(datagram.data).trim();
-        _completeNextWaiter(text);
+        if (datagram == null) return;
+        _handleReply(Uint8List.fromList(datagram.data));
       },
-      onError: (Object error) => _failAllWaiters(error),
       cancelOnError: false,
     );
 
@@ -57,36 +55,40 @@ class HidClient {
     _resolvedHost = host;
   }
 
-  /// Sends a raw command line (without trailing newline). Returns the next
-  /// reply text the socket receives within [replyTimeout]; null if no reply
-  /// arrived in time.
-  Future<String?> sendLine(
-    String line, {
-    Duration replyTimeout = const Duration(milliseconds: 400),
-    bool awaitReply = true,
-  }) async {
+  void send(Uint8List bytes) {
     final socket = _socket;
     final address = _address;
     final port = _port;
     if (socket == null || address == null || port == null) {
       throw StateError('HidClient is not configured');
     }
+    socket.send(bytes, address, port);
+  }
 
-    final bytes = Uint8List.fromList('$line\n'.codeUnits);
-    final sent = socket.send(bytes, address, port);
-    if (sent == 0) {
-      throw const SocketException('UDP send returned 0 bytes');
-    }
+  /// Sends a `PING` and resolves with the round-trip time when the matching
+  /// `PONG` arrives, or `null` on timeout.
+  Future<Duration?> ping({
+    Duration timeout = const Duration(milliseconds: 500),
+  }) async {
+    final seq = ++_pingSeq & 0xffffffff;
+    final completer = Completer<Duration>();
+    _pendingPings[seq] = completer;
+    final stopwatch = Stopwatch()..start();
+    _pingStopwatches[seq] = stopwatch;
 
-    if (!awaitReply) {
-      return null;
-    }
-    final completer = Completer<String>();
-    _waiters.add(completer);
     try {
-      return await completer.future.timeout(replyTimeout);
+      send(HidProtocol.ping(seq));
+    } catch (error) {
+      _pendingPings.remove(seq);
+      _pingStopwatches.remove(seq);
+      rethrow;
+    }
+
+    try {
+      return await completer.future.timeout(timeout);
     } on TimeoutException {
-      _waiters.remove(completer);
+      _pendingPings.remove(seq);
+      _pingStopwatches.remove(seq);
       return null;
     }
   }
@@ -97,31 +99,22 @@ class HidClient {
     _address = null;
     _port = null;
     _resolvedHost = null;
-    _failAllWaiters(const SocketException('UDP socket closed'));
-  }
-
-  bool get isConfigured => _socket != null;
-
-  void _completeNextWaiter(String text) {
-    if (_waiters.isEmpty) {
-      return;
-    }
-    final next = _waiters.removeAt(0);
-    if (!next.isCompleted) {
-      next.complete(text);
-    }
-  }
-
-  void _failAllWaiters(Object error) {
-    if (_waiters.isEmpty) {
-      return;
-    }
-    final pending = List<Completer<String>>.from(_waiters);
-    _waiters.clear();
-    for (final completer in pending) {
+    for (final completer in _pendingPings.values) {
       if (!completer.isCompleted) {
-        completer.completeError(error);
+        completer.completeError(const SocketException('UDP socket closed'));
       }
+    }
+    _pendingPings.clear();
+    _pingStopwatches.clear();
+  }
+
+  void _handleReply(Uint8List bytes) {
+    final seq = HidProtocol.parsePong(bytes);
+    if (seq == null) return;
+    final completer = _pendingPings.remove(seq);
+    final stopwatch = _pingStopwatches.remove(seq);
+    if (completer != null && !completer.isCompleted) {
+      completer.complete(stopwatch?.elapsed ?? Duration.zero);
     }
   }
 }

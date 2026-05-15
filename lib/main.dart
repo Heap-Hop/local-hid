@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'hid_client.dart';
+import 'protocol.dart';
 import 'settings.dart';
 
 void main() {
@@ -39,6 +40,9 @@ class _HomePageState extends State<HomePage>
   HidSettings? _settings;
   String _status = 'Loading settings...';
   late final TabController _tabs;
+  Timer? _pingTimer;
+  Duration? _lastRtt;
+  bool _online = false;
 
   @override
   void initState() {
@@ -49,6 +53,7 @@ class _HomePageState extends State<HomePage>
 
   @override
   void dispose() {
+    _pingTimer?.cancel();
     _tabs.dispose();
     unawaited(_client.close());
     super.dispose();
@@ -56,66 +61,71 @@ class _HomePageState extends State<HomePage>
 
   Future<void> _init() async {
     final settings = await HidSettings.load();
-    if (!mounted) {
-      return;
-    }
+    if (!mounted) return;
     setState(() => _settings = settings);
     await _reconnect(settings);
   }
 
   Future<void> _reconnect(HidSettings settings) async {
+    _pingTimer?.cancel();
     try {
       await _client.configure(host: settings.host, port: settings.port);
-      _setStatus('Target ${settings.host}:${settings.port} (UDP)');
+      _setStatus('Target ${settings.host}:${settings.port}');
+      unawaited(_pingNow());
+      _pingTimer = Timer.periodic(
+        const Duration(seconds: 3),
+        (_) => _pingNow(),
+      );
     } catch (error) {
+      _setOnline(false);
       _setStatus('Configure failed: $error');
     }
   }
 
-  void _setStatus(String message) {
-    if (!mounted) {
-      return;
+  Future<void> _pingNow() async {
+    try {
+      final rtt = await _client.ping();
+      if (!mounted) return;
+      setState(() {
+        _online = rtt != null;
+        _lastRtt = rtt;
+      });
+    } catch (_) {
+      _setOnline(false);
     }
+  }
+
+  void _setOnline(bool value) {
+    if (!mounted) return;
+    setState(() {
+      _online = value;
+      if (!value) _lastRtt = null;
+    });
+  }
+
+  void _setStatus(String message) {
+    if (!mounted) return;
     setState(() => _status = message);
   }
 
   Future<void> _openSettings() async {
     final settings = _settings;
-    if (settings == null) {
-      return;
-    }
+    if (settings == null) return;
     final updated = await Navigator.of(context).push<HidSettings>(
-      MaterialPageRoute(
-        builder: (_) => SettingsPage(initial: settings),
-      ),
+      MaterialPageRoute(builder: (_) => SettingsPage(initial: settings)),
     );
-    if (updated == null) {
-      return;
-    }
+    if (updated == null) return;
     setState(() => _settings = updated);
     await _reconnect(updated);
   }
 
-  Future<void> _send(
-    String line, {
-    bool awaitReply = true,
-    bool showOk = false,
-  }) async {
+  void _send(Uint8List packet) {
     if (!_client.isConfigured) {
       _setStatus('Not configured yet.');
       return;
     }
     try {
-      final reply = await _client.sendLine(line, awaitReply: awaitReply);
-      if (awaitReply) {
-        if (reply == null) {
-          _setStatus('Sent "$line" (no reply within 400ms)');
-        } else if (reply.startsWith('err')) {
-          _setStatus('Firmware: $reply');
-        } else if (showOk) {
-          _setStatus('Firmware: $reply');
-        }
-      }
+      _client.send(packet);
     } catch (error) {
       _setStatus('Send failed: $error');
     }
@@ -123,6 +133,16 @@ class _HomePageState extends State<HomePage>
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final rttLabel = _online
+        ? (_lastRtt == null
+            ? 'connected'
+            : 'connected · ${_lastRtt!.inMilliseconds}ms')
+        : 'offline';
+    final statusColor = _online
+        ? theme.colorScheme.primary
+        : theme.colorScheme.error;
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Local HID'),
@@ -157,12 +177,27 @@ class _HomePageState extends State<HomePage>
           Container(
             width: double.infinity,
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            color: Theme.of(context).colorScheme.surfaceContainerHighest,
-            child: Text(
-              _status,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodySmall,
+            color: theme.colorScheme.surfaceContainerHighest,
+            child: Row(
+              children: [
+                Icon(
+                  _online ? Icons.cloud_done : Icons.cloud_off,
+                  size: 16,
+                  color: statusColor,
+                ),
+                const SizedBox(width: 6),
+                Text(rttLabel,
+                    style: theme.textTheme.bodySmall?.copyWith(color: statusColor)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    _status,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall,
+                  ),
+                ),
+              ],
             ),
           ),
         ],
@@ -171,11 +206,7 @@ class _HomePageState extends State<HomePage>
   }
 }
 
-typedef HidSender = Future<void> Function(
-  String line, {
-  bool awaitReply,
-  bool showOk,
-});
+typedef HidSender = void Function(Uint8List packet);
 
 // ─── Touchpad ────────────────────────────────────────────────────────────────
 
@@ -195,7 +226,6 @@ class _TouchpadPaneState extends State<TouchpadPane> {
   Timer? _flushTimer;
   double _pendingDx = 0;
   double _pendingDy = 0;
-  bool _sending = false;
   bool _active = false;
 
   @override
@@ -223,10 +253,7 @@ class _TouchpadPaneState extends State<TouchpadPane> {
     _flushTimer ??= Timer.periodic(_flushInterval, (_) => _flush());
   }
 
-  Future<void> _flush() async {
-    if (_sending) {
-      return;
-    }
+  void _flush() {
     var dx = _pendingDx.round();
     var dy = _pendingDy.round();
     if (dx == 0 && dy == 0) {
@@ -236,22 +263,15 @@ class _TouchpadPaneState extends State<TouchpadPane> {
       }
       return;
     }
-
     dx = dx.clamp(-127, 127);
     dy = dy.clamp(-127, 127);
     _pendingDx -= dx;
     _pendingDy -= dy;
-    _sending = true;
-    try {
-      await widget.onSend(
-        'm $dx $dy',
-        awaitReply: false,
-        showOk: false,
-      );
-    } finally {
-      _sending = false;
-    }
+    widget.onSend(HidProtocol.mouseMove(dx, dy));
   }
+
+  void _click(int buttonMask) =>
+      widget.onSend(HidProtocol.mouseClick(buttonMask));
 
   @override
   Widget build(BuildContext context) {
@@ -266,13 +286,10 @@ class _TouchpadPaneState extends State<TouchpadPane> {
               onPanUpdate: _onPanUpdate,
               onPanEnd: _onPanEnd,
               onPanCancel: () => _active = false,
-              onTap: () =>
-                  widget.onSend('c left', awaitReply: false, showOk: false),
-              onDoubleTap: () async {
-                await widget.onSend('c left',
-                    awaitReply: false, showOk: false);
-                await widget.onSend('c left',
-                    awaitReply: false, showOk: false);
+              onTap: () => _click(MouseButton.left),
+              onDoubleTap: () {
+                _click(MouseButton.left);
+                _click(MouseButton.left);
               },
               child: Container(
                 decoration: BoxDecoration(
@@ -296,24 +313,21 @@ class _TouchpadPaneState extends State<TouchpadPane> {
             children: [
               Expanded(
                 child: FilledButton.tonal(
-                  onPressed: () =>
-                      widget.onSend('c left', awaitReply: false, showOk: false),
+                  onPressed: () => _click(MouseButton.left),
                   child: const Text('Left click'),
                 ),
               ),
               const SizedBox(width: 8),
               Expanded(
                 child: FilledButton.tonal(
-                  onPressed: () => widget.onSend('c middle',
-                      awaitReply: false, showOk: false),
+                  onPressed: () => _click(MouseButton.middle),
                   child: const Text('Middle'),
                 ),
               ),
               const SizedBox(width: 8),
               Expanded(
                 child: FilledButton.tonal(
-                  onPressed: () => widget.onSend('c right',
-                      awaitReply: false, showOk: false),
+                  onPressed: () => _click(MouseButton.right),
                   child: const Text('Right click'),
                 ),
               ),
@@ -352,19 +366,17 @@ class _KeyboardPaneState extends State<KeyboardPane> {
     super.dispose();
   }
 
-  Future<void> _sendKey(String name) =>
-      widget.onSend('k $name', awaitReply: false, showOk: false);
+  void _tap(int keycode) =>
+      widget.onSend(HidProtocol.keyTap(keycode));
 
-  Future<void> _typeString(String text) async {
+  void _tapChar(String ch) {
+    final keycode = HidKey.fromChar(ch);
+    if (keycode != null) _tap(keycode);
+  }
+
+  void _typeString(String text) {
     for (final ch in text.split('')) {
-      final lower = ch.toLowerCase();
-      if (RegExp(r'^[a-z0-9]$').hasMatch(lower)) {
-        await _sendKey(lower);
-      } else if (ch == ' ') {
-        await _sendKey('space');
-      } else if (ch == '\n') {
-        await _sendKey('enter');
-      }
+      _tapChar(ch);
     }
   }
 
@@ -389,13 +401,11 @@ class _KeyboardPaneState extends State<KeyboardPane> {
               ),
               const SizedBox(width: 8),
               FilledButton(
-                onPressed: () async {
+                onPressed: () {
                   final text = _inputController.text;
-                  if (text.isEmpty) {
-                    return;
-                  }
+                  if (text.isEmpty) return;
                   _inputController.clear();
-                  await _typeString(text);
+                  _typeString(text);
                 },
                 child: const Text('Send'),
               ),
@@ -406,15 +416,16 @@ class _KeyboardPaneState extends State<KeyboardPane> {
             spacing: 6,
             runSpacing: 6,
             children: [
-              _SpecialKey(label: 'Esc', onTap: () => _sendKey('esc')),
-              _SpecialKey(label: 'Tab', onTap: () => _sendKey('tab')),
-              _SpecialKey(label: 'Backspace', onTap: () => _sendKey('backspace')),
-              _SpecialKey(label: 'Enter', onTap: () => _sendKey('enter')),
-              _SpecialKey(label: 'Space', onTap: () => _sendKey('space')),
-              _SpecialKey(label: '←', onTap: () => _sendKey('left')),
-              _SpecialKey(label: '↑', onTap: () => _sendKey('up')),
-              _SpecialKey(label: '↓', onTap: () => _sendKey('down')),
-              _SpecialKey(label: '→', onTap: () => _sendKey('right')),
+              _SpecialKey(label: 'Esc', onTap: () => _tap(HidKey.escape)),
+              _SpecialKey(label: 'Tab', onTap: () => _tap(HidKey.tab)),
+              _SpecialKey(
+                  label: 'Backspace', onTap: () => _tap(HidKey.backspace)),
+              _SpecialKey(label: 'Enter', onTap: () => _tap(HidKey.enter)),
+              _SpecialKey(label: 'Space', onTap: () => _tap(HidKey.space)),
+              _SpecialKey(label: '←', onTap: () => _tap(HidKey.left)),
+              _SpecialKey(label: '↑', onTap: () => _tap(HidKey.up)),
+              _SpecialKey(label: '↓', onTap: () => _tap(HidKey.down)),
+              _SpecialKey(label: '→', onTap: () => _tap(HidKey.right)),
             ],
           ),
           const SizedBox(height: 12),
@@ -432,8 +443,7 @@ class _KeyboardPaneState extends State<KeyboardPane> {
                               child: Padding(
                                 padding:
                                     const EdgeInsets.symmetric(horizontal: 2),
-                                child:
-                                    _Key(label: key, onTap: () => _sendKey(key)),
+                                child: _Key(label: key, onTap: () => _tapChar(key)),
                               ),
                             ),
                         ],
@@ -497,13 +507,16 @@ class MediaPane extends StatelessWidget {
   final HidSender onSend;
 
   static const _buttons = <_MediaButton>[
-    _MediaButton(label: 'Play / Pause', name: 'playpause', icon: Icons.play_arrow),
-    _MediaButton(label: 'Next', name: 'next', icon: Icons.skip_next),
-    _MediaButton(label: 'Previous', name: 'prev', icon: Icons.skip_previous),
-    _MediaButton(label: 'Stop', name: 'stop', icon: Icons.stop),
-    _MediaButton(label: 'Volume +', name: 'volup', icon: Icons.volume_up),
-    _MediaButton(label: 'Volume -', name: 'voldown', icon: Icons.volume_down),
-    _MediaButton(label: 'Mute', name: 'mute', icon: Icons.volume_off),
+    _MediaButton(
+        label: 'Play / Pause', usage: HidMedia.playPause, icon: Icons.play_arrow),
+    _MediaButton(label: 'Next', usage: HidMedia.scanNext, icon: Icons.skip_next),
+    _MediaButton(
+        label: 'Previous', usage: HidMedia.scanPrev, icon: Icons.skip_previous),
+    _MediaButton(label: 'Stop', usage: HidMedia.stop, icon: Icons.stop),
+    _MediaButton(label: 'Volume +', usage: HidMedia.volumeUp, icon: Icons.volume_up),
+    _MediaButton(
+        label: 'Volume -', usage: HidMedia.volumeDown, icon: Icons.volume_down),
+    _MediaButton(label: 'Mute', usage: HidMedia.mute, icon: Icons.volume_off),
   ];
 
   @override
@@ -518,8 +531,7 @@ class MediaPane extends StatelessWidget {
         children: [
           for (final btn in _buttons)
             FilledButton.tonalIcon(
-              onPressed: () =>
-                  onSend('md ${btn.name}', awaitReply: false, showOk: false),
+              onPressed: () => onSend(HidProtocol.mediaTap(btn.usage)),
               icon: Icon(btn.icon),
               label: Text(btn.label),
             ),
@@ -530,10 +542,14 @@ class MediaPane extends StatelessWidget {
 }
 
 class _MediaButton {
-  const _MediaButton({required this.label, required this.name, required this.icon});
+  const _MediaButton({
+    required this.label,
+    required this.usage,
+    required this.icon,
+  });
 
   final String label;
-  final String name;
+  final int usage;
   final IconData icon;
 }
 
@@ -572,9 +588,7 @@ class _SettingsPageState extends State<SettingsPage> {
     }
     final settings = HidSettings(host: host, port: port);
     await settings.save();
-    if (!mounted) {
-      return;
-    }
+    if (!mounted) return;
     Navigator.of(context).pop(settings);
   }
 
