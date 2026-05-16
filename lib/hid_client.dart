@@ -21,6 +21,20 @@ class HidClient {
 
   bool get isConfigured => _socket != null;
 
+  /// Tear down and rebind the underlying UDP socket against the same target.
+  /// Used by callers that have detected the socket has gone stale (e.g. the
+  /// phone went through Wi-Fi sleep and the kernel still accepts sends but
+  /// silently drops them).
+  Future<void> rebind() async {
+    final host = _resolvedHost;
+    final port = _port;
+    if (host == null || port == null) {
+      return;
+    }
+    await close();
+    await configure(host: host, port: port);
+  }
+
   Future<void> configure({required String host, required int port}) async {
     if (_resolvedHost == host && _port == port && _socket != null) {
       return;
@@ -32,7 +46,12 @@ class HidClient {
     if (addresses.isEmpty) {
       throw SocketException('Could not resolve host "$host"');
     }
-    final address = addresses.first;
+    // Prefer IPv4 since the firmware binds 0.0.0.0; fall back to whatever
+    // the OS resolver gave us if IPv4 is missing entirely.
+    final address = addresses.firstWhere(
+      (a) => a.type == InternetAddressType.IPv4,
+      orElse: () => addresses.first,
+    );
 
     final socket = await RawDatagramSocket.bind(
       InternetAddress.anyIPv4,

@@ -35,7 +35,15 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+  static const _pingInterval = Duration(seconds: 3);
+
+  /// How many consecutive PING timeouts before we tear down and rebind the
+  /// UDP socket. Two misses (~6 s of silence) is a good balance between
+  /// recovering quickly from Wi-Fi sleep / NAT eviction and not thrashing
+  /// when the firmware is just briefly slow.
+  static const _rebindAfterFailures = 2;
+
   final _client = HidClient();
   HidSettings? _settings;
   String _status = 'Loading settings...';
@@ -43,20 +51,32 @@ class _HomePageState extends State<HomePage>
   Timer? _pingTimer;
   Duration? _lastRtt;
   bool _online = false;
+  int _consecutiveFailures = 0;
 
   @override
   void initState() {
     super.initState();
     _tabs = TabController(length: 3, vsync: this);
+    WidgetsBinding.instance.addObserver(this);
     unawaited(_init());
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _pingTimer?.cancel();
     _tabs.dispose();
     unawaited(_client.close());
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && _settings != null) {
+      // Coming back from background: the socket may have been torn down by
+      // the OS while we were paused. Rebind eagerly so the next packet flies.
+      unawaited(_rebindAndPing('resumed from background'));
+    }
   }
 
   Future<void> _init() async {
@@ -68,14 +88,12 @@ class _HomePageState extends State<HomePage>
 
   Future<void> _reconnect(HidSettings settings) async {
     _pingTimer?.cancel();
+    _consecutiveFailures = 0;
     try {
       await _client.configure(host: settings.host, port: settings.port);
       _setStatus('Target ${settings.host}:${settings.port}');
       unawaited(_pingNow());
-      _pingTimer = Timer.periodic(
-        const Duration(seconds: 3),
-        (_) => _pingNow(),
-      );
+      _pingTimer = Timer.periodic(_pingInterval, (_) => _pingNow());
     } catch (error) {
       _setOnline(false);
       _setStatus('Configure failed: $error');
@@ -86,12 +104,43 @@ class _HomePageState extends State<HomePage>
     try {
       final rtt = await _client.ping();
       if (!mounted) return;
+      if (rtt != null) {
+        _consecutiveFailures = 0;
+        setState(() {
+          _online = true;
+          _lastRtt = rtt;
+        });
+        return;
+      }
+
+      // No PONG arrived in time — count it. After N misses, rebind the UDP
+      // socket. The phone may have gone through Wi-Fi sleep or our NAT
+      // mapping on the router may have been evicted; either way the cheapest
+      // recovery is to throw the socket away and bind a fresh one.
+      _consecutiveFailures++;
       setState(() {
-        _online = rtt != null;
-        _lastRtt = rtt;
+        _online = false;
+        _lastRtt = null;
       });
-    } catch (_) {
+      if (_consecutiveFailures >= _rebindAfterFailures && _settings != null) {
+        await _rebindAndPing(
+            'auto-rebind after $_consecutiveFailures missed pings');
+      }
+    } catch (error) {
       _setOnline(false);
+      _setStatus('Ping failed: $error');
+    }
+  }
+
+  Future<void> _rebindAndPing(String reason) async {
+    _consecutiveFailures = 0;
+    try {
+      await _client.rebind();
+      _setStatus(reason);
+      unawaited(_pingNow());
+    } catch (error) {
+      _setOnline(false);
+      _setStatus('Rebind failed: $error');
     }
   }
 
