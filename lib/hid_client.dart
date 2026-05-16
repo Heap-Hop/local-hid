@@ -81,7 +81,16 @@ class HidClient {
     if (socket == null || address == null || port == null) {
       throw StateError('HidClient is not configured');
     }
-    socket.send(bytes, address, port);
+    try {
+      socket.send(bytes, address, port);
+    } on SocketException {
+      // UDP is fire-and-forget. The board may be offline, the routing table
+      // may have no entry for the target subnet, the phone may be in Wi-Fi
+      // sleep — any of which surfaces as an OS error here. The PING/PONG
+      // heartbeat is the canonical source of "are we connected", and the UI
+      // status bar reflects it. Swallow rather than flood the console with
+      // one unhandled exception per dropped datagram.
+    }
   }
 
   /// Sends a `PING` and resolves with the round-trip time when the matching

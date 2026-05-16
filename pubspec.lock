@@ -49,6 +49,13 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.0.9"
+  esp_remote_log_viewer:
+    dependency: "direct main"
+    description:
+      path: "packages/esp_remote_log_viewer"
+      relative: true
+    source: path
+    version: "0.1.0"
   fake_async:
     dependency: transitive
     description:
@@ -152,6 +159,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.17.0"
+  multicast_dns:
+    dependency: "direct main"
+    description:
+      name: multicast_dns
+      sha256: de72ada5c3db6fdd6ad4ae99452fe05fb403c4bb37c67ceb255ddd37d2b5b1eb
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.3.3"
   path:
     dependency: transitive
     description:

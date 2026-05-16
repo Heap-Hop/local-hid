@@ -1,0 +1,20 @@
+name: esp_remote_log_viewer
+description: Listen for ESP-IDF log lines streamed over UDP (paired with the esp-remote-log Rust crate) and render them as a pluggable Flutter widget.
+version: 0.1.0
+publish_to: 'none'
+
+environment:
+  sdk: ^3.10.7
+  flutter: '>=3.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

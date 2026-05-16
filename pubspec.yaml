@@ -11,6 +11,9 @@ dependencies:
     sdk: flutter
   cupertino_icons: ^1.0.8
   shared_preferences: ^2.5.5
+  multicast_dns: ^0.3.2
+  esp_remote_log_viewer:
+    path: packages/esp_remote_log_viewer
 
 dev_dependencies:
   flutter_test:

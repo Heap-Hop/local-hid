@@ -1,8 +1,10 @@
 import 'dart:async';
 
+import 'package:esp_remote_log_viewer/esp_remote_log_viewer.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'discovery.dart';
 import 'hid_client.dart';
 import 'protocol.dart';
 import 'settings.dart';
@@ -45,6 +47,7 @@ class _HomePageState extends State<HomePage>
   static const _rebindAfterFailures = 2;
 
   final _client = HidClient();
+  final _logService = RemoteLogService();
   HidSettings? _settings;
   String _status = 'Loading settings...';
   late final TabController _tabs;
@@ -56,7 +59,7 @@ class _HomePageState extends State<HomePage>
   @override
   void initState() {
     super.initState();
-    _tabs = TabController(length: 3, vsync: this);
+    _tabs = TabController(length: 4, vsync: this);
     WidgetsBinding.instance.addObserver(this);
     unawaited(_init());
   }
@@ -67,6 +70,7 @@ class _HomePageState extends State<HomePage>
     _pingTimer?.cancel();
     _tabs.dispose();
     unawaited(_client.close());
+    unawaited(_logService.dispose());
     super.dispose();
   }
 
@@ -89,6 +93,9 @@ class _HomePageState extends State<HomePage>
   Future<void> _reconnect(HidSettings settings) async {
     _pingTimer?.cancel();
     _consecutiveFailures = 0;
+    // Point the TCP log service at the same host. Log port is fixed at 9001
+    // for v1; mDNS TXT already advertises it for forward compat.
+    unawaited(_logService.connect(host: settings.host));
     try {
       await _client.configure(host: settings.host, port: settings.port);
       _setStatus('Target ${settings.host}:${settings.port}');
@@ -207,6 +214,7 @@ class _HomePageState extends State<HomePage>
             Tab(icon: Icon(Icons.touch_app), text: 'Touchpad'),
             Tab(icon: Icon(Icons.keyboard), text: 'Keys'),
             Tab(icon: Icon(Icons.music_note), text: 'Media'),
+            Tab(icon: Icon(Icons.terminal), text: 'Logs'),
           ],
         ),
       ),
@@ -220,6 +228,7 @@ class _HomePageState extends State<HomePage>
                 TouchpadPane(onSend: _send),
                 KeyboardPane(onSend: _send),
                 MediaPane(onSend: _send),
+                RemoteLogPane(service: _logService),
               ],
             ),
           ),
@@ -618,12 +627,60 @@ class _SettingsPageState extends State<SettingsPage> {
       TextEditingController(text: widget.initial.host);
   late final TextEditingController _port =
       TextEditingController(text: widget.initial.port.toString());
+  bool _discovering = false;
+  String? _discoveryStatus;
 
   @override
   void dispose() {
     _host.dispose();
     _port.dispose();
     super.dispose();
+  }
+
+  Future<void> _discover() async {
+    setState(() {
+      _discovering = true;
+      _discoveryStatus = 'Searching the local network…';
+    });
+    try {
+      final boards = await discoverBoards();
+      if (!mounted) return;
+      if (boards.isEmpty) {
+        setState(() => _discoveryStatus =
+            'No firmware found. Make sure the board is on the same Wi-Fi.');
+        return;
+      }
+      final chosen = boards.length == 1
+          ? boards.first
+          : await showDialog<DiscoveredBoard>(
+              context: context,
+              builder: (_) => SimpleDialog(
+                title: const Text('Pick a board'),
+                children: [
+                  for (final b in boards)
+                    SimpleDialogOption(
+                      onPressed: () => Navigator.of(context).pop(b),
+                      child: Text('${b.instance} — ${b.host}:${b.port}'),
+                    ),
+                ],
+              ),
+            );
+      if (chosen == null) {
+        setState(() => _discoveryStatus = 'Cancelled.');
+        return;
+      }
+      setState(() {
+        _host.text = chosen.host;
+        _port.text = chosen.port.toString();
+        _discoveryStatus =
+            'Picked ${chosen.instance} (${chosen.host}:${chosen.port})';
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _discoveryStatus = 'Discovery failed: $error');
+    } finally {
+      if (mounted) setState(() => _discovering = false);
+    }
   }
 
   Future<void> _save() async {
@@ -651,9 +708,25 @@ class _SettingsPageState extends State<SettingsPage> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             const Text(
-              'Set the IP and UDP port the ESP32-S3 firmware is listening on. '
-              'The firmware logs its IP on the serial monitor at boot.',
+              'Set the IP and UDP port the ESP32-S3 firmware is listening on, '
+              'or hit "Discover" to find boards advertising over mDNS.',
             ),
+            const SizedBox(height: 12),
+            FilledButton.tonalIcon(
+              onPressed: _discovering ? null : _discover,
+              icon: _discovering
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.travel_explore),
+              label: const Text('Discover boards (mDNS)'),
+            ),
+            if (_discoveryStatus != null) ...[
+              const SizedBox(height: 6),
+              Text(_discoveryStatus!,
+                  style: Theme.of(context).textTheme.bodySmall),
+            ],
             const SizedBox(height: 16),
             TextField(
               controller: _host,
